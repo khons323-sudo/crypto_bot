@@ -1,6 +1,7 @@
 """
 bot.py  ─  Coin Direction 텔레그램 봇
            업비트 KRW + 다중 알림 + 인라인 버튼
+           수정: edit 실패시 새 메시지로 fallback
 """
 import os, asyncio, requests, pytz, traceback
 from datetime import datetime
@@ -10,7 +11,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 load_dotenv()
 
@@ -122,7 +123,7 @@ def fetch_long_short(symbol="BTC") -> dict:
 # 2. 유틸리티
 # ════════════════════════════════════════════
 
-def arrow(chg): return "🟢" if chg >= 0 else "🔴"
+def arrow(chg): return "+" if chg >= 0 else "-"  # 마크다운 안전 문자
 
 def fmt_krw(price: float) -> str:
     if price >= 100_000_000:
@@ -131,6 +132,8 @@ def fmt_krw(price: float) -> str:
         return f"{price/10_000:.0f}만원"
     else:
         return f"{price:,.0f}원"
+
+def chg_icon(chg): return "🟢" if chg >= 0 else "🔴"
 
 def ls_bar(lp: float) -> str:
     f = max(0, min(10, round(lp/10)))
@@ -150,16 +153,43 @@ def cd_ok(key: str) -> bool:
     cooldown[key] = now
     return True
 
-async def safe_edit(query, text, keyboard=None):
+
+# ════════════════════════════════════════════
+# safe_edit: 실패하면 새 메시지로 fallback
+# ════════════════════════════════════════════
+
+async def safe_edit(query, text: str, keyboard=None):
+    """edit 실패시 새 메시지로 자동 전송"""
     try:
         await query.edit_message_text(
-            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
+            text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML   # ★ HTML 모드 사용 (마크다운 오류 방지)
         )
     except BadRequest as e:
-        if "not modified" not in str(e).lower():
-            print(f"[edit 오류] {e}")
+        err = str(e).lower()
+        if "not modified" in err:
+            return  # 동일 내용 - 무시
+        # 그 외 오류 → 새 메시지로 전송
+        print(f"[edit 실패→새메시지] {e}")
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e2:
+            print(f"[새메시지도 실패] {e2}")
     except Exception as e:
         print(f"[safe_edit 오류] {e}")
+        try:
+            await query.message.reply_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        except:
+            pass
 
 
 # ════════════════════════════════════════════
@@ -217,13 +247,13 @@ def kb_alert_list(coin: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🟢 상향추가", callback_data=f"addup_{coin}"),
             InlineKeyboardButton("🔴 하향추가", callback_data=f"adddown_{coin}"),
         ],
-        [InlineKeyboardButton(f"🗑️ {coin} 전체삭제", callback_data=f"clearalert_{coin}")],
+        [InlineKeyboardButton(f"🗑 {coin} 전체삭제", callback_data=f"clearalert_{coin}")],
         [InlineKeyboardButton("◀ 돌아가기", callback_data=f"coin_{coin}")],
     ])
 
 
 # ════════════════════════════════════════════
-# 4. 컨텐츠 빌더
+# 4. 컨텐츠 빌더 (HTML 태그 사용)
 # ════════════════════════════════════════════
 
 def build_brief() -> str:
@@ -239,12 +269,13 @@ def build_brief() -> str:
         d = c.get(name)
         if not d or not d.get("price"):
             return f"  {name}: 수집 실패"
-        return f"  {arrow(d['chg'])} *{name}*: {fmt_krw(d['price'])} ({d['chg']:+.2f}%)"
+        ic = chg_icon(d['chg'])
+        return f"  {ic} <b>{name}</b>: {fmt_krw(d['price'])} ({d['chg']:+.2f}%)"
 
     def oline(name):
         d = o.get(name,{}); p = d.get("price",0); ch = d.get("chg",0)
         if not p: return f"  {name}: 수집 실패"
-        return f"  {arrow(ch)} *{name}*: ${p:.2f} ({ch:+.2f}%)"
+        return f"  {chg_icon(ch)} <b>{name}</b>: ${p:.2f} ({ch:+.2f}%)"
 
     wti_p = o.get("WTI",{}).get("price",0)
     oil_warn = ""
@@ -252,18 +283,19 @@ def build_brief() -> str:
     elif 0 < wti_p <= cfg["oil_low"]:  oil_warn = "\n  ✅ 유가 진정!"
     v = fg["val"]
     return (
-        f"📊 *Coin Direction 브리핑*\n"
-        f"🕐 {now}\n💱 환율: ₩{rate:,.0f}/USD\n"
-        f"{'─'*26}\n"
-        f"💰 *암호화폐 (업비트 KRW)*\n"
+        f"<b>📊 Coin Direction 브리핑</b>\n"
+        f"🕐 {now}\n"
+        f"💱 환율: ₩{rate:,.0f}/USD\n"
+        f"{'─'*24}\n"
+        f"<b>💰 암호화폐 (업비트 KRW)</b>\n"
         f"{cline('BTC')}\n{cline('DOGE')}\n"
         f"{cline('ETH')}\n{cline('SOL')}\n{cline('XRP')}\n\n"
-        f"📊 *롱숏*\n"
+        f"<b>📊 롱숏</b>\n"
         f"  BTC  {ls_bar(bl['long'])} {bl['long']}%\n"
         f"  DOGE {ls_bar(dl['long'])} {dl['long']}%\n\n"
-        f"{'─'*26}\n"
-        f"🛢 유가\n{oline('WTI')}\n{oline('Brent')}{oil_warn}\n\n"
-        f"{fg_emoji(v)} 공포탐욕: *{v}/100* _{fg['label']}_"
+        f"{'─'*24}\n"
+        f"<b>🛢 유가</b>\n{oline('WTI')}\n{oline('Brent')}{oil_warn}\n\n"
+        f"{fg_emoji(v)} 공포탐욕: <b>{v}/100</b> {fg['label']}"
     )
 
 def build_coin(coin: str) -> str:
@@ -275,9 +307,9 @@ def build_coin(coin: str) -> str:
     p = d["price"]; ch = d["chg"]
     sign = "+" if d["chg_amt"]>=0 else ""
     al = multi_alerts.get(coin, [])
-    al_str = "\n\n🔔 *등록된 알림 없음*\n아래 버튼으로 추가하세요"
+    al_str = "\n\n🔔 <b>등록된 알림 없음</b>\n아래 버튼으로 추가하세요"
     if al:
-        al_str = "\n\n🔔 *등록 알림*\n"
+        al_str = "\n\n🔔 <b>등록 알림</b>\n"
         for a in sorted(al, key=lambda x:x["price"], reverse=True):
             icon = "🟢↑" if a["dir"]=="up" else "🔴↓"
             lbl  = f" [{a['label']}]" if a.get("label") else ""
@@ -286,8 +318,8 @@ def build_coin(coin: str) -> str:
             al_str += f"  {icon} {fmt_krw(a['price'])}{lbl}{done}\n"
     emoji = {"BTC":"₿","DOGE":"🐕","ETH":"Ξ","SOL":"◎","XRP":"✕"}.get(coin, coin)
     return (
-        f"{emoji} *{coin} (업비트 KRW)*\n"
-        f"현재가: *{fmt_krw(p)}*\n"
+        f"{emoji} <b>{coin} (업비트 KRW)</b>\n"
+        f"현재가: <b>{fmt_krw(p)}</b>\n"
         f"변동: {ch:+.2f}% ({sign}{fmt_krw(d['chg_amt'])})\n"
         f"고가: {fmt_krw(d['high'])}  저가: {fmt_krw(d['low'])}\n"
         f"전일: {fmt_krw(d['prev'])}\n"
@@ -298,11 +330,11 @@ def build_coin(coin: str) -> str:
 
 def build_listalert(coin: str) -> str:
     if coin == "ALL":
-        msg = "🔔 *전체 알림 현황*\n\n"
+        msg = "<b>🔔 전체 알림 현황</b>\n\n"
         total = 0
         for cn, al in multi_alerts.items():
             if al:
-                msg += f"*{cn}* ({len(al)}개)\n"
+                msg += f"<b>{cn}</b> ({len(al)}개)\n"
                 for a in sorted(al, key=lambda x:x["price"], reverse=True):
                     icon = "🟢↑" if a["dir"]=="up" else "🔴↓"
                     lbl  = f" [{a['label']}]" if a.get("label") else ""
@@ -315,10 +347,10 @@ def build_listalert(coin: str) -> str:
     c   = fetch_upbit_prices()
     cur = c.get(coin,{}).get("price",0)
     if not al:
-        return f"🔔 *{coin} 등록 알림 없음*\n아래 버튼으로 추가하세요 👇"
-    msg = f"🔔 *{coin} 알림 목록*\n"
+        return f"🔔 <b>{coin} 등록 알림 없음</b>\n아래 버튼으로 추가하세요 👇"
+    msg = f"🔔 <b>{coin} 알림 목록</b>\n"
     if cur: msg += f"현재가: {fmt_krw(cur)}\n"
-    msg += "─"*18 + "\n"
+    msg += "─"*16 + "\n"
     for a in sorted(al, key=lambda x:x["price"], reverse=True):
         icon = "🟢↑" if a["dir"]=="up" else "🔴↓"
         lbl  = f" [{a['label']}]" if a.get("label") else ""
@@ -330,7 +362,7 @@ def build_listalert(coin: str) -> str:
 
 
 # ════════════════════════════════════════════
-# 5. 콜백 핸들러 (버튼 클릭)
+# 5. 콜백 핸들러
 # ════════════════════════════════════════════
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -346,7 +378,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         if data == "menu":
             await safe_edit(query,
-                "🤖 *Coin Direction*\n원하는 항목을 선택하세요 👇",
+                "🤖 <b>Coin Direction</b>\n원하는 항목을 선택하세요 👇",
                 kb_main()
             )
 
@@ -357,12 +389,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data == "rate":
             rate = fetch_usd_krw()
             await safe_edit(query,
-                f"💱 *달러/원 환율*\n\n*₩{rate:,.0f} / USD*",
+                f"💱 <b>달러/원 환율</b>\n\n<b>₩{rate:,.0f} / USD</b>",
                 kb_back()
             )
 
         elif data.startswith("coin_"):
-            coin = data.split("coin_")[1]
+            coin = data.replace("coin_", "")
             await safe_edit(query, f"⏳ {coin} 조회 중...", None)
             await safe_edit(query, build_coin(coin), kb_coin(coin))
 
@@ -374,7 +406,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if wti_p >= 100: warn = "\n🚨 $100 돌파! 스태그플레이션 경보"
             elif 0 < wti_p <= 80: warn = "\n✅ $80 이하! 반등 기대"
             await safe_edit(query,
-                f"🛢 *유가 (USD)*\n\n"
+                f"🛢 <b>유가 (USD)</b>\n\n"
                 f"WTI:   ${wti_p:.2f} ({wti.get('chg',0):+.2f}%)\n"
                 f"Brent: ${brent.get('price',0):.2f} ({brent.get('chg',0):+.2f}%)\n\n"
                 f"🚨 위험: $100↑  🟡 중립: $80~95  ✅ 안전: $75↓{warn}",
@@ -384,7 +416,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data == "ls":
             bl = fetch_long_short("BTC"); dl = fetch_long_short("DOGE")
             await safe_edit(query,
-                f"📊 *롱숏 비율*\n\n"
+                f"<b>📊 롱숏 비율</b>\n\n"
                 f"BTC\n{ls_bar(bl['long'])} {bl['long']}%롱\n\n"
                 f"DOGE\n{ls_bar(dl['long'])} {dl['long']}%롱\n\n"
                 f"롱 75%↑ → 과열  |  숏 65%↑ → 반등 가능",
@@ -394,15 +426,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif data == "fg":
             fg = fetch_fear_greed(); v = fg["val"]
             await safe_edit(query,
-                f"{fg_emoji(v)} *공포탐욕지수*\n\n"
-                f"현재: *{v}/100*  {fg['label']}\n\n"
+                f"{fg_emoji(v)} <b>공포탐욕지수</b>\n\n"
+                f"현재: <b>{v}/100</b>  {fg['label']}\n\n"
                 f"😱 0~25 극단공포\n😨 26~40 공포\n"
                 f"😐 41~60 중립\n😄 61~75 탐욕\n🤑 76~100 극단탐욕",
                 kb_back()
             )
 
         elif data.startswith("listalert_"):
-            coin = data.split("listalert_")[1]
+            coin = data.replace("listalert_", "")
             text = build_listalert(coin)
             kb   = kb_alert_list(coin) if coin != "ALL" else kb_back()
             await safe_edit(query, text, kb)
@@ -418,25 +450,25 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "XRP":  [("1000","1천원"), ("1500","1.5천원"), ("2000","2천원")],
             }.get(coin, [("100","100원")])
             ex_str = "\n".join([
-                f"`/addalert {coin} {p} {direction} {lbl}`"
+                f"/addalert {coin} {p} {direction} {lbl}"
                 for p, lbl in examples
             ])
             await safe_edit(query,
-                f"🔔 *{coin} {direction} 알림 추가*\n\n"
+                f"🔔 <b>{coin} {direction} 알림 추가</b>\n\n"
                 f"채팅창에 아래 명령어를 입력하세요:\n\n"
-                f"{ex_str}\n\n"
-                f"형식:\n`/addalert {coin} [가격] {direction} [이름]`",
+                f"<code>{ex_str}</code>\n\n"
+                f"형식:\n<code>/addalert {coin} [가격] {direction} [이름]</code>",
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀ 돌아가기", callback_data=f"coin_{coin}")
                 ]])
             )
 
         elif data.startswith("clearalert_"):
-            coin = data.split("clearalert_")[1]
+            coin = data.replace("clearalert_", "")
             count = len(multi_alerts.get(coin, []))
             multi_alerts[coin] = []
             await safe_edit(query,
-                f"🗑️ *{coin} 알림 전체 삭제 완료*\n{count}개 삭제됨",
+                f"🗑 <b>{coin} 알림 전체 삭제 완료</b>\n{count}개 삭제됨",
                 InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀ 돌아가기", callback_data=f"coin_{coin}")
                 ]])
@@ -444,19 +476,18 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         elif data == "alert_help":
             await safe_edit(query,
-                "⚙️ *알림 명령어 안내*\n\n"
-                "📌 *다중 알림 추가*\n"
-                "`/addalert DOGE 130 상향 1차목표`\n"
-                "`/addalert DOGE 110 하향 지지선`\n"
-                "`/addalert BTC 100000000 상향 1억`\n\n"
-                "📋 *알림 목록*\n"
-                "`/listalert DOGE`\n\n"
-                "🗑️ *알림 삭제*\n"
-                "`/delalert DOGE 130`\n"
-                "`/clearalert DOGE`\n\n"
-                "⚙️ *BTC/유가 기본 알림*\n"
-                "`/setalert BTC_HIGH 110000000`\n"
-                "`/setalert OIL_HIGH 100`",
+                "<b>⚙️ 알림 명령어 안내</b>\n\n"
+                "<b>다중 알림 추가</b>\n"
+                "<code>/addalert DOGE 130 상향 1차목표</code>\n"
+                "<code>/addalert DOGE 110 하향 지지선</code>\n"
+                "<code>/addalert BTC 100000000 상향 1억</code>\n\n"
+                "<b>알림 목록</b>\n"
+                "<code>/listalert DOGE</code>\n\n"
+                "<b>알림 삭제</b>\n"
+                "<code>/delalert DOGE 130</code>\n"
+                "<code>/clearalert DOGE</code>\n\n"
+                "<b>BTC/유가 기본 알림</b>\n"
+                "<code>/setalert BTC_HIGH 110000000</code>",
                 kb_back()
             )
 
@@ -466,6 +497,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"[버튼 오류] {data}: {e}")
         traceback.print_exc()
+        # 최후 수단: 오류 메시지라도 전송
+        try:
+            await query.message.reply_text(
+                f"⚠️ 오류 발생\n{str(e)[:100]}\n\n/menu 로 다시 시도해주세요"
+            )
+        except:
+            pass
 
 
 # ════════════════════════════════════════════
@@ -474,40 +512,40 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(u: Update, _):
     await u.message.reply_text(
-        "🤖 *Coin Direction* (업비트 KRW)\n아래 버튼을 눌러 확인하세요 👇",
+        "🤖 <b>Coin Direction</b> (업비트 KRW)\n아래 버튼을 눌러 확인하세요 👇",
         reply_markup=kb_main(),
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.HTML
     )
 
 async def cmd_menu(u: Update, _):
     await u.message.reply_text(
-        "📊 *메인 메뉴*",
+        "📊 <b>메인 메뉴</b>",
         reply_markup=kb_main(),
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.HTML
     )
 
 async def cmd_now(u: Update, _):
-    msg = await u.message.reply_text("⏳ 수집 중...", parse_mode=ParseMode.MARKDOWN)
-    await msg.edit_text(build_brief(), reply_markup=kb_back(), parse_mode=ParseMode.MARKDOWN)
+    msg = await u.message.reply_text("⏳ 수집 중...", parse_mode=ParseMode.HTML)
+    await msg.edit_text(build_brief(), reply_markup=kb_back(), parse_mode=ParseMode.HTML)
 
 async def cmd_btc(u: Update, _):
-    await u.message.reply_text(build_coin("BTC"), reply_markup=kb_coin("BTC"), parse_mode=ParseMode.MARKDOWN)
+    await u.message.reply_text(build_coin("BTC"), reply_markup=kb_coin("BTC"), parse_mode=ParseMode.HTML)
 
 async def cmd_doge(u: Update, _):
-    await u.message.reply_text(build_coin("DOGE"), reply_markup=kb_coin("DOGE"), parse_mode=ParseMode.MARKDOWN)
+    await u.message.reply_text(build_coin("DOGE"), reply_markup=kb_coin("DOGE"), parse_mode=ParseMode.HTML)
 
 async def cmd_eth(u: Update, _):
-    await u.message.reply_text(build_coin("ETH"), reply_markup=kb_coin("ETH"), parse_mode=ParseMode.MARKDOWN)
+    await u.message.reply_text(build_coin("ETH"), reply_markup=kb_coin("ETH"), parse_mode=ParseMode.HTML)
 
 async def cmd_sol(u: Update, _):
-    await u.message.reply_text(build_coin("SOL"), reply_markup=kb_coin("SOL"), parse_mode=ParseMode.MARKDOWN)
+    await u.message.reply_text(build_coin("SOL"), reply_markup=kb_coin("SOL"), parse_mode=ParseMode.HTML)
 
 async def cmd_oil(u: Update, _):
     o = fetch_oil(); wti = o.get("WTI",{}); brent = o.get("Brent",{})
     await u.message.reply_text(
         f"🛢 WTI: ${wti.get('price',0):.2f} ({wti.get('chg',0):+.2f}%)\n"
         f"Brent: ${brent.get('price',0):.2f} ({brent.get('chg',0):+.2f}%)",
-        reply_markup=kb_back(), parse_mode=ParseMode.MARKDOWN
+        reply_markup=kb_back(), parse_mode=ParseMode.HTML
     )
 
 async def cmd_addalert(u: Update, _):
@@ -520,24 +558,27 @@ async def cmd_addalert(u: Update, _):
         if coin not in multi_alerts:
             await u.message.reply_text(f"❌ 지원: {', '.join(multi_alerts.keys())}"); return
         dir_en = "up" if direction in ["상향","up","위","상"] else "down"
-        dir_kr = "🟢↑ 상향" if dir_en=="up" else "🔴↓ 하향"
+        dir_kr = "🟢 상향" if dir_en=="up" else "🔴 하향"
         for a in multi_alerts[coin]:
             if a["price"]==price and a["dir"]==dir_en:
                 await u.message.reply_text(f"⚠️ 이미 등록: {coin} {dir_kr} {fmt_krw(price)}"); return
         multi_alerts[coin].append({"price":price,"dir":dir_en,"label":label})
         lbl_str = f" [{label}]" if label else ""
         await u.message.reply_text(
-            f"✅ *{coin} 알림 추가!*\n{dir_kr}: {fmt_krw(price)}{lbl_str}\n총 {len(multi_alerts[coin])}개",
-            reply_markup=kb_coin(coin), parse_mode=ParseMode.MARKDOWN
+            f"✅ <b>{coin} 알림 추가!</b>\n{dir_kr}: {fmt_krw(price)}{lbl_str}\n총 {len(multi_alerts[coin])}개",
+            reply_markup=kb_coin(coin), parse_mode=ParseMode.HTML
         )
     except:
-        await u.message.reply_text("사용법: `/addalert DOGE 130 상향 1차목표`", parse_mode=ParseMode.MARKDOWN)
+        await u.message.reply_text(
+            "사용법: <code>/addalert DOGE 130 상향 1차목표</code>",
+            parse_mode=ParseMode.HTML
+        )
 
 async def cmd_listalert(u: Update, _):
     parts = u.message.text.split()
     coin  = parts[1].upper() if len(parts)>1 else "ALL"
     kb    = kb_alert_list(coin) if coin!="ALL" else kb_back()
-    await u.message.reply_text(build_listalert(coin), reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+    await u.message.reply_text(build_listalert(coin), reply_markup=kb, parse_mode=ParseMode.HTML)
 
 async def cmd_delalert(u: Update, _):
     try:
@@ -546,10 +587,12 @@ async def cmd_delalert(u: Update, _):
         before = len(multi_alerts.get(coin,[]))
         multi_alerts[coin] = [a for a in multi_alerts.get(coin,[]) if a["price"]!=price]
         after = len(multi_alerts[coin])
-        msg = f"🗑️ {coin} {fmt_krw(price)} 삭제 완료" if before>after else f"⚠️ {fmt_krw(price)} 알림 없음"
-        await u.message.reply_text(msg, reply_markup=kb_coin(coin), parse_mode=ParseMode.MARKDOWN)
+        msg = f"🗑 {coin} {fmt_krw(price)} 삭제 완료" if before>after else f"⚠️ {fmt_krw(price)} 알림 없음"
+        await u.message.reply_text(msg, reply_markup=kb_coin(coin), parse_mode=ParseMode.HTML)
     except:
-        await u.message.reply_text("사용법: `/delalert DOGE 130`", parse_mode=ParseMode.MARKDOWN)
+        await u.message.reply_text(
+            "사용법: <code>/delalert DOGE 130</code>", parse_mode=ParseMode.HTML
+        )
 
 async def cmd_clearalert(u: Update, _):
     try:
@@ -557,11 +600,13 @@ async def cmd_clearalert(u: Update, _):
         count = len(multi_alerts.get(coin,[]))
         multi_alerts[coin] = []
         await u.message.reply_text(
-            f"🗑️ {coin} {count}개 전체 삭제",
-            reply_markup=kb_main(), parse_mode=ParseMode.MARKDOWN
+            f"🗑 {coin} {count}개 전체 삭제",
+            reply_markup=kb_main(), parse_mode=ParseMode.HTML
         )
     except:
-        await u.message.reply_text("사용법: `/clearalert DOGE`", parse_mode=ParseMode.MARKDOWN)
+        await u.message.reply_text(
+            "사용법: <code>/clearalert DOGE</code>", parse_mode=ParseMode.HTML
+        )
 
 async def cmd_setalert(u: Update, _):
     try:
@@ -576,13 +621,13 @@ async def cmd_setalert(u: Update, _):
         else:
             await u.message.reply_text(f"❌ 키: {', '.join(mapping.keys())}")
     except:
-        await u.message.reply_text("사용법: `/setalert BTC_HIGH 110000000`", parse_mode=ParseMode.MARKDOWN)
+        await u.message.reply_text(
+            "사용법: <code>/setalert BTC_HIGH 110000000</code>", parse_mode=ParseMode.HTML
+        )
 
 
 # ════════════════════════════════════════════
 # 7. 자동 모니터링
-#    ★ 알림 메시지: 버튼 없이 텍스트만 발송
-#    ★ 정기 브리핑: 메인 메뉴 버튼 첨부
 # ════════════════════════════════════════════
 
 async def auto_monitor(bot: Bot):
@@ -595,34 +640,29 @@ async def auto_monitor(bot: Bot):
             fg = fetch_fear_greed()
             alerts = []
 
-            # ── 기본 알림 (BTC / 유가 / 공포지수) ──
             btc = c.get("BTC",{}); wti = o.get("WTI",{}); v = fg.get("val",50)
 
             if btc.get("price",0) >= cfg["btc_high"] and cd_ok("btc_high"):
                 alerts.append(
-                    f"🚀 *BTC 상단 돌파!*\n"
+                    f"🚀 <b>BTC 상단 돌파!</b>\n"
                     f"현재: {fmt_krw(btc['price'])} ({btc.get('chg',0):+.2f}%)\n"
                     f"임계값: {fmt_krw(cfg['btc_high'])} 이상"
                 )
             elif 0 < btc.get("price",999e6) <= cfg["btc_low"] and cd_ok("btc_low"):
                 alerts.append(
-                    f"⚠️ *BTC 하단 이탈!*\n"
+                    f"⚠️ <b>BTC 하단 이탈!</b>\n"
                     f"현재: {fmt_krw(btc['price'])} ({btc.get('chg',0):+.2f}%)\n"
                     f"임계값: {fmt_krw(cfg['btc_low'])} 이하"
                 )
-
             if wti.get("price",0) >= cfg["oil_high"] and cd_ok("oil_high"):
-                alerts.append(f"🛢🚨 *WTI 급등!* ${wti['price']:.2f} → 코인 하방 압력")
+                alerts.append(f"🛢🚨 <b>WTI 급등!</b> ${wti['price']:.2f} → 코인 하방 압력")
             elif 0 < wti.get("price",999) <= cfg["oil_low"] and cd_ok("oil_low"):
-                alerts.append(f"🛢✅ *WTI 진정!* ${wti['price']:.2f} → 반등 기대")
-
-            # 공포탐욕: 알림만 발송, 버튼 없음
+                alerts.append(f"🛢✅ <b>WTI 진정!</b> ${wti['price']:.2f} → 반등 기대")
             if v <= 15 and cd_ok("fg_fear"):
-                alerts.append(f"😱 *극단 공포!* {v}/100\n매수 기회 신호일 수 있음")
+                alerts.append(f"😱 <b>극단 공포!</b> {v}/100\n매수 기회 신호일 수 있음")
             elif v >= 80 and cd_ok("fg_greed"):
-                alerts.append(f"🤑 *극단 탐욕!* {v}/100\n과열 주의")
+                alerts.append(f"🤑 <b>극단 탐욕!</b> {v}/100\n과열 주의")
 
-            # ── 다중 알림 ──
             for coin, al in multi_alerts.items():
                 cur = c.get(coin,{}).get("price",0)
                 if not cur: continue
@@ -631,33 +671,27 @@ async def auto_monitor(bot: Bot):
                     lbl = f" [{a['label']}]" if a.get("label") else ""
                     if a["dir"]=="up" and cur>=a["price"] and cd_ok(key):
                         alerts.append(
-                            f"🚀 *{coin} 상향 돌파!{lbl}*\n"
-                            f"현재: {fmt_krw(cur)}\n"
-                            f"목표: {fmt_krw(a['price'])} ✅"
+                            f"🚀 <b>{coin} 상향 돌파!{lbl}</b>\n"
+                            f"현재: {fmt_krw(cur)}\n목표: {fmt_krw(a['price'])} ✅"
                         )
                     elif a["dir"]=="down" and cur<=a["price"] and cd_ok(key):
                         alerts.append(
-                            f"⚠️ *{coin} 하향 이탈!{lbl}*\n"
-                            f"현재: {fmt_krw(cur)}\n"
-                            f"경계: {fmt_krw(a['price'])} 🔴"
+                            f"⚠️ <b>{coin} 하향 이탈!{lbl}</b>\n"
+                            f"현재: {fmt_krw(cur)}\n경계: {fmt_krw(a['price'])} 🔴"
                         )
 
-            # ★ 알림은 버튼 없이 텍스트만 발송
+            # 알림: 버튼 없이 텍스트만
             for msg in alerts:
-                await bot.send_message(
-                    CHAT_ID, msg,
-                    parse_mode=ParseMode.MARKDOWN
-                    # reply_markup 없음 → 버튼 중복 제거
-                )
+                await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
 
-            # ★ 정기 브리핑만 메인 메뉴 버튼 첨부
+            # 정기 브리핑: 메인 메뉴 버튼 첨부
             counter += CHECK_SEC
             if counter >= BRIEF_SEC:
                 await bot.send_message(
                     CHAT_ID,
-                    f"⏰ *정기 브리핑*\n{build_brief()}",
+                    f"⏰ <b>정기 브리핑</b>\n{build_brief()}",
                     reply_markup=kb_main(),
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.HTML
                 )
                 counter = 0
 
