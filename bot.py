@@ -719,38 +719,43 @@ async def auto_monitor(bot: Bot):
 # 8. 메인
 # ════════════════════════════════════════════
 
-def main():
-    if not BOT_TOKEN: print("❌ TELEGRAM_BOT_TOKEN 없음"); return
-    if not CHAT_ID:   print("❌ TELEGRAM_CHAT_ID 없음");   return
+async def main():
+    if not BOT_TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN 없음")
+        return
+    if not CHAT_ID:
+        print("❌ TELEGRAM_CHAT_ID 없음")
+        return
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     for cmd, fn in [
-        ("start",      cmd_start),
-        ("menu",       cmd_menu),
-        ("now",        cmd_now),
-        ("btc",        cmd_btc),
-        ("doge",       cmd_doge),
-        ("eth",        cmd_eth),
-        ("sol",        cmd_sol),
-        ("oil",        cmd_oil),
-        ("addalert",   cmd_addalert),
-        ("listalert",  cmd_listalert),
-        ("delalert",   cmd_delalert),
+        ("start", cmd_start),
+        ("menu", cmd_menu),
+        ("now", cmd_now),
+        ("btc", cmd_btc),
+        ("doge", cmd_doge),
+        ("eth", cmd_eth),
+        ("sol", cmd_sol),
+        ("oil", cmd_oil),
+        ("addalert", cmd_addalert),
+        ("listalert", cmd_listalert),
+        ("delalert", cmd_delalert),
         ("clearalert", cmd_clearalert),
-        ("setalert",   cmd_setalert),
+        ("setalert", cmd_setalert),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
 
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.post_init = lambda a: asyncio.get_event_loop().create_task(
-        auto_monitor(a.bot)
-    )
+    async def start_tasks(application):
+        asyncio.create_task(auto_monitor(application.bot))
+
+    app.post_init = start_tasks
 
     print("🤖 Coin Direction 봇 시작!")
-    app.run_polling(drop_pending_updates=True)
+    await app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
