@@ -4,6 +4,8 @@ bot.py  ─  Coin Direction 텔레그램 봇
            수정: edit 실패시 새 메시지로 fallback
 """
 import os, asyncio, requests, pytz, traceback
+from flask import Flask
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,6 +16,18 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 
 load_dotenv()
+
+# Railway health server
+app = Flask(__name__)
+@app.route("/")
+def home():
+    return "Coin Direction Bot Running"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web).start()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
