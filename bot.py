@@ -18,14 +18,14 @@ from telegram.error import BadRequest, TelegramError
 load_dotenv()
 
 # Railway health server
-app = Flask(__name__)
-@app.route("/")
+web_app = Flask(__name__)
+@web_app.route("/")
 def home():
     return "Coin Direction Bot Running"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    web_app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_web).start()
 
